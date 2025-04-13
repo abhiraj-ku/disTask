@@ -2,6 +2,7 @@ package coordinator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -99,7 +100,35 @@ func (c *CoordinatorServer) awaitShutDown() error {
 	return c.Stop()
 }
 
-func (c *CoordinatorServer) Stop() error {}
+func (c *CoordinatorServer) Stop() error {
+	//
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.wg.Wait()
+
+	// waits for anygroutine who is working once done lock the resources and then close each worker
+
+	c.WorkerPoolMutex.Lock()
+	defer c.WorkerPoolMutex.Unlock()
+	for _, worker := range c.WorkerPool {
+		if worker.grpcConnection != nil {
+			worker.grpcConnection.Close()
+		}
+	}
+	if c.grpcServer != nil {
+		c.grpcServer.GracefulStop()
+	}
+
+	if c.listner != nil {
+		return c.listner.Close()
+	}
+
+	if c.dbPool != nil {
+		c.dbPool.Close()
+	}
+	return nil
+}
 
 // startGRPCServer function starts the gRPC server
 
@@ -147,4 +176,69 @@ func (c *CoordinatorServer) SubmitTask(ctx context.Context, in *pb.ClientTaskReq
 	}, nil
 
 }
-func (c *CoordinatorServer) dispatchTasktoWorker(task *pb.TaskRequest) error {}
+func (c *CoordinatorServer) dispatchTasktoWorker(task *pb.TaskRequest) error {
+	worker := c.getNextWorker()
+	if worker == nil {
+		return errors.New("no worker available to work")
+	}
+
+	_, err := worker.workerServiceClient.SubmitTask(context.Background(), task)
+	return err
+
+}
+func (c *CoordinatorServer) getNextWorker() *WorkerInfo {
+
+	// we will select the workers in a round robin kind of format
+	// round robin --> 1->2->3->4 and so on , so we need to have lock on WorkerPool
+	// to avoid deadlock
+	c.WorkerPoolKeysMutex.RLock() // this method make sure the worker pool is being read only .
+	defer c.WorkerPoolKeysMutex.RUnlock()
+
+	workerCount := len(c.WorkerPoolKeys)
+	if workerCount == 0 {
+		return nil
+	}
+
+	/*
+			 Round Robin visualization
+
+			 CoordinatorServer.WorkerPoolKeys: ["worker-a", "worker-b", "worker-c"]
+			 CoordinatorServer.WorkerPool:  this is dummy data and does not resembles the actual workerInfo struct see the workerInfo struct
+			{
+		    "worker-a": &workerInfo{ID: "worker-a", Address: "192.168.1.10:8080"},
+		    "worker-b": &workerInfo{ID: "worker-b", Address: "192.168.1.11:8080"},
+		    "worker-c": &workerInfo{ID: "worker-c", Address: "192.168.1.12:8080"},
+			}
+
+			initally roundRobinIndex == 0
+			0 % 3 (len currently) == 0 ; WorkerPoolKeys[0] == "worker-a"
+			WorkerPool["worker-a"] -> return the data --> "worker-a": &workerInfo{ID: "worker-a", Address: "192.168.1.10:8080"},
+
+			next roundRobinIndex == 1 and this process continues
+	*/
+
+	nextWorker := c.WorkerPool[c.WorkerPoolKeys[c.roundRobinIndex%uint32(workerCount)]]
+	c.roundRobinIndex++
+
+	return nextWorker
+
+}
+
+// Function to scan db every time interval using time.Ticker
+
+func (c *CoordinatorServer) scanDB() {
+	ticker := time.NewTicker(scanInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			go c.ExecuteAllScheduledTask()
+		case <-c.ctx.Done():
+			log.Println("Shutting the db scanner method")
+			return
+		}
+	}
+}
+
+// ExecuteAllScheduledTask fetches and delegates to workers

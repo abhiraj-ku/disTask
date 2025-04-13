@@ -2,7 +2,6 @@ package scheduler
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"log/slog"
@@ -129,17 +128,7 @@ func (s *SchedulerServer) handleScheduletask(w http.ResponseWriter, r *http.Requ
 		ScheduledAt: convertToUnix.Unix(),
 		TaskID:      taskID,
 	}
-	marshalData, err := json.Marshal(response)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to marshal response. Error: %s", err.Error()),
-			http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-
-	w.Write(marshalData)
+	err = helper.WriteJSON(w, http.StatusCreated, response)
 
 }
 func (s *SchedulerServer) handleSchedulerStatus(w http.ResponseWriter, r *http.Request) {
@@ -202,15 +191,7 @@ func (s *SchedulerServer) handleSchedulerStatus(w http.ResponseWriter, r *http.R
 		response.FailedAt = task.FailedAt.Time.String()
 	}
 
-	marshalResp, err := json.Marshal(response)
-	if err != nil {
-		http.Error(w, "Failed to marshal the response object", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	w.Write(marshalResp)
+	helper.WriteJSON(w, http.StatusCreated, response)
 }
 
 func (s *SchedulerServer) insertTaskToDB(ctx context.Context, task Task) (string, error) {
