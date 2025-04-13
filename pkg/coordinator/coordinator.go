@@ -27,20 +27,20 @@ const (
 )
 
 type CoordinatorServer struct {
-	serverPort          string
 	listner             net.Listener
+	serverPort          string
 	grpcServer          *grpc.Server
 	WorkerPool          map[uint32]*WorkerInfo
-	WorkerPoolMutex     sync.Mutex
 	WorkerPoolKeys      []uint32
+	WorkerPoolMutex     sync.Mutex
 	WorkerPoolKeysMutex sync.RWMutex
 	maxHeartBeatMisses  uint8
 	heartBeatInterval   time.Duration
 	roundRobinIndex     uint32
 	dbString            string
 	dbPool              *pgxpool.Pool
-	ctx                 context.Context
 	cancel              context.CancelFunc
+	ctx                 context.Context
 	wg                  sync.WaitGroup
 }
 
