@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/abhiraj-ku/disTask/pkg/helper"
 	"github.com/jackc/pgtype"
 	"github.com/jackc/pgx/v4/pgxpool"
 )
@@ -88,17 +89,17 @@ func (s *SchedulerServer) Start() error {
 func (s *SchedulerServer) handleScheduletask(w http.ResponseWriter, r *http.Request) {
 
 	// check if its post request or not
-	if r.Method != "POST" {
+	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed ,only POST request", http.StatusMethodNotAllowed)
 		return
 	}
 	var userRequest UserRequest
-	if err := json.NewDecoder(r.Body).Decode(&userRequest); err != nil {
+	if err := helper.ReadJSON(w, r, &userRequest); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	log.Printf("Following request received: %+v", userRequest)
+	slog.Info("Request received", "request", userRequest)
 
 	// Parse the time later convert to unix timestamp for storing in db
 	scheduledTime, err := time.Parse(time.RFC3339, userRequest.ScheduledAt)
@@ -142,21 +143,18 @@ func (s *SchedulerServer) handleScheduletask(w http.ResponseWriter, r *http.Requ
 
 }
 func (s *SchedulerServer) handleSchedulerStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "GET" {
+	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed ,only GET request", http.StatusMethodNotAllowed)
 		return
 	}
 
 	taskId := r.URL.Query().Get("task_id")
-	if taskId == " " {
-		http.Error(w, "task id is missing", http.StatusBadRequest)
+	if taskId == "" {
+		http.Error(w, "task id is required", http.StatusBadRequest)
 		return
 	}
 
-	var task Task
-	query := `select & from tasks where id=$1`
-	err := s.dbPool.QueryRow(context.Background(), query, taskId).Scan(&task.ID, &task.Command, &task.ScheduledAt, &task.PickedAt, &task.StartedAt, &task.CompletedAt, &task.FailedAt)
-
+	task, err := s.getTaskById(r.Context(), taskId)
 	if err != nil {
 		http.Error(w, "failed to fetch the task id ", http.StatusBadRequest)
 		return
@@ -214,34 +212,74 @@ func (s *SchedulerServer) handleSchedulerStatus(w http.ResponseWriter, r *http.R
 	w.WriteHeader(http.StatusOK)
 	w.Write(marshalResp)
 }
+
 func (s *SchedulerServer) insertTaskToDB(ctx context.Context, task Task) (string, error) {
 	query := `insert into tasks (command , scheduled_at) values($1,$2) returning id`
 	var insertedId string
 
 	err := s.dbPool.QueryRow(ctx, query, task.Command, task.ScheduledAt).Scan(&insertedId)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("database insertion error:%w", err)
 	}
 	return insertedId, nil
 }
+
+// getTaskById(ctx, taskID) (Task,error)
+func (s *SchedulerServer) getTaskById(ctx context.Context, taskID string) (Task, error) {
+	var task Task
+
+	query := `select id, command, scheduled_at, picked_at, started_at, completed_at, failed_at 
+	from tasks where id = $1`
+
+	err := s.dbPool.QueryRow(ctx, query, taskID).Scan(
+		&task.ID,
+		&task.Command,
+		&task.ScheduledAt,
+		&task.PickedAt,
+		&task.StartedAt,
+		&task.CompletedAt,
+		&task.FailedAt,
+	)
+	if err != nil {
+		return Task{}, fmt.Errorf("error fetching task: %w", err)
+	}
+	return task, nil
+}
+
 func (s *SchedulerServer) awaitShutDown() error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 
-	<-stop
+	select {
+	case <-stop:
+		slog.Info("shutdown signal recieved")
+	case <-s.ctx.Done():
+		slog.Info("context cancellsss")
+	}
 
 	return s.Stop()
 
 }
 func (s *SchedulerServer) Stop() error {
-	defer s.dbPool.Close()
+	slog.Info("Shutting down scheduler service")
+
+	if s.cancel != nil {
+		s.cancel()
+	}
 
 	if s.httpServer != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		return s.httpServer.Shutdown(ctx)
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			slog.Error("Server shutdown Error")
+			return err
+		}
 	}
-	log.Println("Scheduler service closing")
+
+	if s.dbPool != nil {
+		s.dbPool.Close()
+	}
+	log.Println("Scheduler service stopped")
 	return nil
 }
