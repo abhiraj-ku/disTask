@@ -241,4 +241,67 @@ func (c *CoordinatorServer) scanDB() {
 	}
 }
 
+// todo: sendheartbeat -> send by workers to connect to the worker pool list
+
 // ExecuteAllScheduledTask fetches and delegates to workers
+func (c *CoordinatorServer) ExecuteAllScheduledTask() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// start the transaction
+	tx, err := c.dbPool.Begin(ctx) // we need to manually call the trxn.rollback as it is not direclty called with ctx cancel
+	if err != nil {
+		log.Printf("error starting transaction:%v\n", err)
+		return
+	}
+	defer func() {
+		defer rows.Close()
+
+		if err := tx.Rollback(ctx); err != nil && err.Error() != "tx is closed" {
+			log.Printf("Error:%#v\n", err)
+			log.Printf("Error in rollback: %v\n", err)
+			return
+		}
+	}()
+
+	query := `select id,command from tasks where scheduled_at< (NOW() + interval '30 seconds') and picked_at is null
+	order by scheduled_at for update skip locked`
+	rows, err := tx.Query(ctx, query)
+	if err != nil {
+		log.Printf("error executing the query %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	var tasks *[]pb.TaskRequest
+	for rows.Next() {
+		var id, command string
+		if err := rows.Scan(&id, &command); err != nil {
+			log.Printf("failed to scan the rows: %v\n", err)
+			continue
+		}
+		tasks = append(tasks, &pb.TaskRequest{TaskId: id, Data: command})
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("error iteratinf over rows:%v\n", err)
+		return
+	}
+
+	// submit task
+	for _, task := range tasks {
+		if err := c.dispatchTasktoWorker(task); err != nil {
+			log.Printf("failed to submit task %s:%v\n", task.GetTaskId(), err)
+			continue
+		}
+		if _, err := tx.Exec(ctx, `update tasks set picked_at= NOW() where id=$1`, task.GetTaskId()); err != nil {
+			log.Printf("failde to update task %s : picket_at  %v\n", task.GetTaskId(), err)
+			continue
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		log.Printf("failed to commit trxn %v\n", err)
+	}
+}
+
+// TODO: manage worker pool
+// TODO: remove the inactive workers
