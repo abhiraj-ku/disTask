@@ -198,6 +198,7 @@ func (c *CoordinatorServer) getNextWorker() *WorkerInfo {
 	if workerCount == 0 {
 		return nil
 	}
+	// TODO: Add some kind of healthy worker check functionality to select worker based on those criterion
 
 	/*
 			 Round Robin visualization
@@ -303,5 +304,56 @@ func (c *CoordinatorServer) ExecuteAllScheduledTask() {
 	}
 }
 
-// TODO: manage worker pool
-// TODO: remove the inactive workers
+// TODO: Add methods to check workers health and implement some kind of recovery mechanism
+func (c *CoordinatorServer) manageWorkerPool() {
+	c.wg.Add(1)
+	defer c.wg.Done()
+
+	ticker := time.NewTicker(time.Duration(c.maxHeartBeatMisses) * c.heartBeatInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			c.removeInactiveWorkers()
+		case <-c.ctx.Done():
+			return
+
+		}
+	}
+}
+
+// TODO: Check for workers who are marked as inactive for 3 min or more
+// Add some kind worker monitoring system
+func (c *CoordinatorServer) removeInactiveWorkers() error {
+	c.WorkerPoolMutex.Lock()
+	defer c.WorkerPoolMutex.Unlock()
+
+	for workerId, worker := range c.WorkerPool {
+		if worker.heartbeatMisses > c.maxHeartBeatMisses {
+			log.Printf("Stale worker found", workerId)
+			worker.grpcConnection.Close()
+			delete(c.WorkerPool, workerId)
+
+			// adjust the new length of worker pool key after deletion of worker
+
+			c.WorkerPoolKeysMutex.Lock()
+
+			newWorkerCount := len(c.WorkerPool)
+			if newWorkerCount == 0 {
+				return fmt.Errorf("no worker found to be removed")
+			}
+
+			c.WorkerPoolKeys = make([]uint32, 0, newWorkerCount)
+			for k := range c.WorkerPool {
+				c.WorkerPoolKeys = append(c.WorkerPoolKeys, k)
+			}
+
+			c.WorkerPoolKeysMutex.Unlock()
+
+		} else {
+			worker.heartbeatMisses++
+		}
+	}
+	return nil
+}
