@@ -15,7 +15,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v4/pgxpool"
+	"github.com/techschool/simplebank/pb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // Declare some global constants like shutdowntime,default max miss ,
@@ -244,6 +246,42 @@ func (c *CoordinatorServer) scanDB() {
 
 // todo: sendheartbeat -> send by workers to connect to the worker pool list
 
+func (c *CoordinatorServer) SendHeartbeat(ctx context.Context, in *pb.HeartbeatRequest) (*pb.HeartbeatResponse, error) {
+	c.WorkerPoolMutex.Lock()
+	defer c.WorkerPoolMutex.Unlock()
+
+	workerID := in.GetWorkerId()
+
+	if worker, ok := c.WorkerPool[workerID]; ok {
+		worker.heartbeatMisses = 0
+	} else {
+		slog.Info("Registering new worker:", fmt.Sprint("worker"), workerID)
+
+		conn, err := grpc.NewClient(in.GetAdress(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			return nil, err
+		}
+
+		c.WorkerPool[workerID] = &WorkerInfo{
+			address:             in.GetAdress(),
+			grpcConnection:      conn,
+			workerServiceClient: pb.NewWorkerServiceClient(conn),
+		}
+
+		c.WorkerPoolKeysMutex.Lock()
+		defer c.WorkerPoolKeysMutex.Unlock()
+
+		workerCount := len(c.WorkerPool)
+
+		c.WorkerPoolKeys = make([]uint32, 0, workerCount)
+		for k := range c.WorkerPool {
+			c.WorkerPoolKeys = append(c.WorkerPoolKeys, k)
+		}
+		slog.Info("Registered worker", fmt.Sprint("worker"), workerID)
+	}
+	return &pb.HeartbeatResponse{Acknowledge: true}, nil
+}
+
 // ExecuteAllScheduledTask fetches and delegates to workers
 func (c *CoordinatorServer) ExecuteAllScheduledTask() {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -302,6 +340,41 @@ func (c *CoordinatorServer) ExecuteAllScheduledTask() {
 	if err := tx.Commit(ctx); err != nil {
 		log.Printf("failed to commit trxn %v\n", err)
 	}
+}
+
+func (c *CoordinatorServer) updateTaskStatus(ctx context.Context, req *pb.UpdateTaskStatusRequest) (*pb.UpdateTaskStatusResponse, error) {
+	currStatus := req.GetStatus()
+	taskId := req.GetTaskId()
+
+	var timestamp time.Time
+
+	var column string
+
+	switch currStatus {
+	case pb.TaskStatus_STARTED:
+		timestamp = time.Unix(req.GetStartedAt(), 0)
+		column = "started_at"
+	case pb.TaskStatus_COMPLETE:
+		timestamp = time.Unix(pb.GetCompletedAt(), 0)
+		column = "completed_at"
+	case pb.TaskStatus_FAILED:
+		timestamp = time.Unix(pb.GetFailedAt(), 0)
+		column = "failed_at"
+	default:
+		log.Println("Invalid status in updateRequestTask")
+		return nil, errors.ErrUnsupported
+	}
+
+	query := fmt.Sprintf("update tasks set %s= $1 where id = $2", column)
+	_, err := c.dbPool.Exec(ctx, query, timestamp, taskId)
+	if err != nil {
+		log.Printf("failed to update task status for task id:%s", taskId)
+		log.Println(err)
+		return nil, err
+	}
+
+	return &pb.UpdateTaskStatusResponse{Success: true}, nil
+
 }
 
 // TODO: Add methods to check workers health and implement some kind of recovery mechanism
