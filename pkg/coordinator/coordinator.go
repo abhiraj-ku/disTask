@@ -15,7 +15,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v4/pgxpool"
-	"github.com/techschool/simplebank/pb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -82,7 +81,7 @@ func (c *CoordinatorServer) Start() error {
 		return fmt.Errorf("gRPC server error,coudn't start the server %w", err)
 	}
 	// connect to dbPool
-	s.dbPool, err = common.ConnectToDB(c.ctx, c.dbString)
+	c.dbPool, err = common.ConnectToDB(c.ctx, c.dbString)
 	if err != nil {
 		return err
 	}
